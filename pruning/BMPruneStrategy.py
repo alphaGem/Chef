@@ -38,7 +38,7 @@ class BMPruneStrategy(bmt.DistributedModule):
         pass
 
     @abstractmethod
-    def get_penalty(self):
+    def get_sparsity(self):
         pass
 
     def inject_mask(self, model):
@@ -57,17 +57,22 @@ class BMPruneStrategy(bmt.DistributedModule):
                 v.forward = types.MethodType(_forward, v)
 
     @abstractmethod
-    def inject_loss(self, calculator):
+    def inject_sparsity(self, calculator):
         pass
 
 
 class HardConcretePruning(BMPruneStrategy):
-    def __init__(self, targets):
-        self.loga = None
+    def __init__(self, dim, targets):
+        self.dim = dim
+        
         super().__init__(
             targets = targets,
             type = 'post'
         )
+        self.loga =  torch.nn.Parameter(
+            torch.FloatTensor([2.5]*dim)
+        )
+        bmt.synchronize()
 
     def set_optimizer(self, optimizer):
         optimizer.add_param_group({'params': self.parameters()})
@@ -92,72 +97,55 @@ class HardConcretePruning(BMPruneStrategy):
         x = x * z
         return x
 
-    def get_penalty(self):
+    def get_sparsity(self):
         shift = torch.FloatTensor([2.4])
         shift = Variable(shift)
-        return torch.sigmoid(self.loga+shift).sum()
+        return torch.sigmoid(self.loga+shift).mean()
 
     def print_mask(self):
         bmt.print_rank(self.loga)
-        avg = torch.FloatTensor([0.5])
+        avg = torch.FloatTensor([0.5]*self.dim)
         avg = torch.nn.Parameter(avg, requires_grad=False)
-        bmt.print_rank(self.quantile_concrete(avg, self.loga))
+        bmt.print_rank(self.quantile_concrete(avg, self.loga).sum()/self.dim)
 
 
-
-class LayerPruning(HardConcretePruning):
-    def __init__(self, layer_name):
-        bmt.print_rank('Init '+layer_name)
-        super().__init__(
-            targets = [layer_name]
-        )
-        self.loga = torch.nn.Parameter(
-            torch.FloatTensor([2.5])
-        )
-        bmt.synchronize()
-
-class MHALayerPruning(LayerPruning):
+class MHALayerPruning(HardConcretePruning):
     def __init__(self, layer):
         self.layer = layer
         super().__init__(
-            'encoder.layers.'+str(layer)+'.self_att.self_attention'
+            dim = 1,
+            targets = ['encoder.layers.'+str(layer)+'.self_att.self_attention']
         )
 
-    def inject_loss(self, calc):
+    def inject_sparsity(self, calc):
         space_q = calc.encoder.layers[self.layer].attn.space_q
         f = space_q.get_dim
-        space_q.get_dim = lambda : f()*self.get_penalty()
+        space_q.get_dim = lambda : f()*self.get_sparsity()
 
         space_k = calc.encoder.layers[self.layer].attn.space_k
         f = space_k.get_dim
-        space_k.get_dim = lambda : f()*self.get_penalty()
+        space_k.get_dim = lambda : f()*self.get_sparsity()
 
         space_v = calc.encoder.layers[self.layer].attn.space_v
         f = space_v.get_dim
-        space_v.get_dim = lambda : f()*self.get_penalty()
+        space_v.get_dim = lambda : f()*self.get_sparsity()
 
 
 
-class FFNLayerPruning(LayerPruning):
+class FFNLayerPruning(HardConcretePruning):
     def __init__(self, layer):
+        self.layer = layer
         super().__init__(
-            'encoder.layers.'+str(layer)+'.ffn.ffn'
+            dim = 1,
+            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn']
         )
 
+    def inject_sparsity(self, calc):
+        space_int = calc.encoder.layers[self.layer].ffn.space_ff
+        f = space_int.get_dim
+        space_int.get_dim = lambda : f()*self.get_sparsity()
 
-
-
-
-
-
-
-
-
-
-
-
-
-class AttentionHeadPruning(BMPruneStrategy): #TODO: not complete
+class AttentionHeadPruning(BMPruneStrategy): # TODO: not complete
     def __init__(self, num_heads, layer):
         self.num_heads = num_heads
         self.mask = torch.rand(num_heads, dtype = torch.half).view(num_heads, 1)
@@ -179,15 +167,18 @@ class AttentionHeadPruning(BMPruneStrategy): #TODO: not complete
         return x
 
 
-class FFNIntermediatePruning(BMPruneStrategy): # TODO: not complete
+class FFNIntermediatePruning(HardConcretePruning): 
     def __init__(self, dim_int, layer):
         self.dim_int = dim_int
-        self.mask = torch.rand(dim_int, dtype = torch.half).view(dim_int)
+        self.layer = layer
         super().__init__(
+            dim = dim_int,
             targets = ['encoder.layers.'+str(layer)+'.ffn.ffn.w_in'],
-            type = 'post'
         )
 
+    def inject_sparsity(self, calc):
+        space_int = calc.encoder.layers[self.layer].ffn.space_ff
+        f = space_int.get_dim
+        space_int.get_dim = lambda : f()*self.get_sparsity()
 
-    def apply_mask(self, x):
-        x = x * self.mask
+    

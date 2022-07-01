@@ -13,7 +13,10 @@ from data import MMapIndexedDataset, Dataset
 import numpy as np
 import pickle as pkl
 from model_center.model import GPT2Config, GPT2
-from pruning import BMPrune, MHALayerPruning, BrutePenalty, GPT2SizeCalculator
+from pruning import BMPrune
+import pruning.BMPruneStrategy as p_strategy
+import pruning.BMPruneLoss as p_loss
+
 import json
 
 import os
@@ -120,21 +123,24 @@ def main():
                 v._modules[k] = v._modules[k]._module
 
     
-    MHA_pruning_list = [MHALayerPruning(i) for i in range(12)]
+    MHA_pruning_list = [p_strategy.MHALayerPruning(i) for i in range(12)]
+    FFN_pruning_list = [p_strategy.FFNLayerPruning(i) for i in range(12)]
+    FFNi_pruning_list = [p_strategy.FFNIntermediatePruning(gpt_base_config.dim_ff, i)  for i in range(12)]
+    pruning_list = MHA_pruning_list + FFN_pruning_list + FFNi_pruning_list
 
-    for p in MHA_pruning_list:
+    for p in pruning_list:
         p.set_optimizer(optimizer)
         bmt.init_parameters(p)
 
-    prune_loss = BrutePenalty(1, GPT2SizeCalculator(gpt_base_config))
+    prune_loss = p_loss.BrutePenalty(10, p_loss.GPT2SizeCalculator(gpt_base_config))
 
-    pruner = BMPrune()
+    pruner = BMPrune.BMPrune()
     
     Trainer.forward = pruner.set_forward(
         gpt,
         Trainer.forward,
         prune_loss,
-        MHA_pruning_list
+        pruning_list
     )
 
     bmt.synchronize()
@@ -187,6 +193,10 @@ def main():
         average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
 
         for p in MHA_pruning_list:
+            p.print_mask()
+        for p in FFN_pruning_list:
+            p.print_mask()
+        for p in FFNi_pruning_list:
             p.print_mask()
         
         #for p in FFN_pruning_list:
