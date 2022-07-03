@@ -8,10 +8,15 @@ class BMPrune:
         self,
         model,
         forward_fn,
+        optimizer,
         prune_loss_controller : BMPruneLossController,
         strategies: List[BMPruneStrategy]):
 
+        self.strategies = strategies
+
         for strategy in strategies:
+            bmt.init_parameters(strategy)
+            strategy.set_optimizer(optimizer)
             strategy.inject_mask(model)
             strategy.inject_sparsity(prune_loss_controller.size_calculator)
         
@@ -31,3 +36,6 @@ class BMPrune:
             return outputs
 
         return forward
+
+
+        

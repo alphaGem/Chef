@@ -1,4 +1,5 @@
 import bmtrain as bmt
+import torch
 
 class BMPruneLossController:
     def get_loss(self):
@@ -11,7 +12,28 @@ class BrutePenalty(BMPruneLossController):
         self.original_size = self.size_calculator.get_size()
         bmt.print_rank(self.original_size)
     def get_loss(self):
-        return self.lmbd * (self.size_calculator.get_size() / self.original_size)
+        return (self.lmbd * (self.size_calculator.get_size() / self.original_size)).to(torch.half)
+
+class LagrangianPenalty(BMPruneLossController):
+    def __init__(self, lmbd, size_calculator, target_sparsity, optimizer):
+        self.lmbd = lmbd
+        self.size_calculator = size_calculator
+        self.l1 = torch.nn.Parameter(
+            torch.HalfTensor([0.0]).cuda()
+        )
+        self.l2 = torch.nn.Parameter(
+            torch.HalfTensor([0.0]).cuda()
+        )
+        self.original_size = self.size_calculator.get_size()
+        self.target_sparsity = target_sparsity
+        optimizer.add_param_group({'params': self.l1, 'maximize': True, 'lr': 1e-2})
+        optimizer.add_param_group({'params': self.l2, 'maximize': True, 'lr': 1e-2})
+    
+    def get_loss(self):
+        s = (self.size_calculator.get_size() / self.original_size).to(torch.half)
+        t = self.target_sparsity
+        bmt.print_rank(self.l1, self.l2, s, t)
+        return self.lmbd * (self.l1*(s-t) + self.l2*(s-t)*(s-t))
 
 class LinearSpace:
     def __init__(

@@ -22,6 +22,9 @@ class BMPruneStrategy(bmt.DistributedModule):
         self.targets = targets
         self.type = type
     
+    def set_optimizer(self, optimizer):
+        optimizer.add_param_group({'params': self.parameters()})
+
     @abstractmethod
     def get_mask(self):
         pass
@@ -33,28 +36,20 @@ class BMPruneStrategy(bmt.DistributedModule):
     def apply_mask(self, x):
         pass
 
-    @abstractmethod
-    def set_optimizer(self, optimizer):
-        pass
-
-    @abstractmethod
-    def get_sparsity(self):
-        pass
-
     def inject_mask(self, model):
         for k, v in model.named_modules():
             if k in self.targets:
-                v.forward_without_mask = v.forward
+                f = v.forward
                 if self.type == 'pre':
-                    def _forward(module_self, x, **kwargs):
+                    def _forward(x, **kwargs):
                         x = self.apply_mask(x)
-                        return module_self.forward_without_mask(x, **kwargs)
+                        return f(x, **kwargs)
                 elif self.type == 'post':
-                    def _forward(module_self, *input, **kwargs):
-                        x = module_self.forward_without_mask(*input, **kwargs)
+                    def _forward(*input, **kwargs):
+                        x = f(*input, **kwargs)
                         return self.apply_mask(x)
             
-                v.forward = types.MethodType(_forward, v)
+                v.forward = _forward
 
     @abstractmethod
     def inject_sparsity(self, calculator):
@@ -70,25 +65,27 @@ class HardConcretePruning(BMPruneStrategy):
             type = 'post'
         )
         self.loga =  torch.nn.Parameter(
-            torch.FloatTensor([2.5]*dim)
+            torch.HalfTensor([2.5]*dim).cuda()
         )
         bmt.synchronize()
 
-    def set_optimizer(self, optimizer):
-        optimizer.add_param_group({'params': self.parameters()})
 
     def quantile_concrete(self, x, loga):
+        x = x.to(torch.float)
+        loga = loga.to(torch.float)
         y = torch.sigmoid((torch.log(x) - torch.log(1-x) + loga))
         return y * (limit_b - limit_a) + limit_a
 
     def get_eps(self, size):
-        eps = torch.FloatTensor(size).uniform_(epsilon, 1-epsilon)
+        eps = torch.HalfTensor(size).uniform_(epsilon, 1-epsilon).cuda()
+        self.eps = eps
         eps = torch.nn.Parameter(eps, requires_grad=False)
         return eps
 
     def get_mask(self):
         z = self.quantile_concrete(self.get_eps(self.loga.size()), self.loga)
         z = F.hardtanh(z, min_val=0, max_val=1)
+        self.z_tmp = z
         z = z.to(torch.half)
         return z
 
@@ -98,15 +95,19 @@ class HardConcretePruning(BMPruneStrategy):
         return x
 
     def get_sparsity(self):
-        shift = torch.FloatTensor([2.4])
-        shift = Variable(shift)
-        return torch.sigmoid(self.loga+shift).mean()
+        shift = torch.HalfTensor([2.4]).cuda()
+        shift = torch.nn.Parameter(shift, requires_grad=False)
+        loga = self.loga.to(torch.float)
+        shift = shift.to(torch.float)
+        s = torch.sigmoid(loga+shift).mean()
+        return s
 
     def print_mask(self):
-        bmt.print_rank(self.loga)
-        avg = torch.FloatTensor([0.5]*self.dim)
+        bmt.print_rank(self.layer, self.loga.mean(), self.eps.mean(), self.z_tmp.mean())
+        avg = torch.HalfTensor([0.5]).cuda()
         avg = torch.nn.Parameter(avg, requires_grad=False)
-        bmt.print_rank(self.quantile_concrete(avg, self.loga).sum()/self.dim)
+        bmt.print_rank(self.quantile_concrete(avg, self.loga).mean())
+        bmt.print_rank(self.loga.grad.mean())
 
 
 class MHALayerPruning(HardConcretePruning):
@@ -173,7 +174,7 @@ class FFNIntermediatePruning(HardConcretePruning):
         self.layer = layer
         super().__init__(
             dim = dim_int,
-            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn.w_in'],
+            targets = ['encoder.layers.'+str(layer)+'.ffn.ffn.w_in']
         )
 
     def inject_sparsity(self, calc):

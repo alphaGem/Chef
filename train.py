@@ -128,17 +128,19 @@ def main():
     FFNi_pruning_list = [p_strategy.FFNIntermediatePruning(gpt_base_config.dim_ff, i)  for i in range(12)]
     pruning_list = MHA_pruning_list + FFN_pruning_list + FFNi_pruning_list
 
-    for p in pruning_list:
-        p.set_optimizer(optimizer)
-        bmt.init_parameters(p)
-
-    prune_loss = p_loss.BrutePenalty(10, p_loss.GPT2SizeCalculator(gpt_base_config))
+    prune_loss = p_loss.LagrangianPenalty(
+        lmbd = 1000, 
+        size_calculator = p_loss.GPT2SizeCalculator(gpt_base_config), 
+        target_sparsity = 0.75, 
+        optimizer = optimizer
+    )
 
     pruner = BMPrune.BMPrune()
     
     Trainer.forward = pruner.set_forward(
         gpt,
         Trainer.forward,
+        optimizer,
         prune_loss,
         pruning_list
     )
@@ -192,12 +194,17 @@ def main():
         iteration_time = time.time() - st
         average_time = average_time * average_time_shift + (1 - average_time_shift) * iteration_time
 
-        for p in MHA_pruning_list:
-            p.print_mask()
-        for p in FFN_pruning_list:
-            p.print_mask()
-        for p in FFNi_pruning_list:
-            p.print_mask()
+
+        bmt.print_rank(prune_loss.l1.grad)
+        bmt.print_rank(prune_loss.l2.grad)
+
+        if iteration % 100 == 0:
+            for p in MHA_pruning_list:
+                p.print_mask()
+            for p in FFN_pruning_list:
+                p.print_mask()
+            for p in FFNi_pruning_list:
+                p.print_mask()
         
         #for p in FFN_pruning_list:
         #    p.print_mask()
